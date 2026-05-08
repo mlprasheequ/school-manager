@@ -1688,7 +1688,7 @@ function AdminDashboardContent() {
        </div>
 
        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
-          <div className="bg-white/5 border border-white/10 p-8 rounded-[2.5rem] space-y-6 sticky top-8">
+          <div className="bg-white/5 border border-white/10 p-8 rounded-[2.5rem] space-y-6 lg:sticky lg:top-8">
              <h4 className="text-xl font-black flex items-center font-black"><Banknote className="w-6 h-6 mr-3 text-blue-400"/>Vault Management</h4>
              <div className="space-y-4">
                 <div><label className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2 block">Entry Description</label><input value={ledgerPurpose} onChange={(e) => setLedgerPurpose(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-2xl text-sm font-bold text-white outline-none" placeholder="e.g. Monthly Electricity" /></div>
