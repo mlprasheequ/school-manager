@@ -15,8 +15,9 @@ import {
   Users, Wallet, LogOut, BookOpen, Trash2, TrendingUp, UserPlus,
   ChevronRight, X, Save, Banknote, Lock, Menu, Search, Activity, ShieldCheck,
   Plus, UsersRound, Calculator, CheckSquare, Square, Clock, Bookmark,
-  Settings, ArrowUpRight, ArrowDownRight, RefreshCw, Mail, CheckCircle2, User, Layout, CreditCard, Upload
+  Settings, ArrowUpRight, ArrowDownRight, RefreshCw, Mail, CheckCircle2, User, Layout, CreditCard, Upload, Download, Calendar
 } from "lucide-react";
+import { downloadCSV, downloadPDF } from "@/lib/download-utils";
 
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -187,6 +188,112 @@ function AdminDashboardContent() {
   const [ledgerParty, setLedgerParty] = useState("");
   const [ledgerType, setLedgerType] = useState<"Income" | "Expense">("Income");
   const [ledgerValue, setLedgerValue] = useState("");
+  const [financeStartDate, setFinanceStartDate] = useState("");
+  const [financeEndDate, setFinanceEndDate] = useState("");
+  const formatSignedCurrency = (amount: number) => {
+    if (amount > 0) return `+₹${Math.abs(amount).toLocaleString()}`;
+    if (amount < 0) return `-₹${Math.abs(amount).toLocaleString()}`;
+    return `₹0`;
+  };
+  const getFinancialYearLabel = (date: Date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth(); // 0 = Jan, 3 = Apr
+    const startYear = month >= 3 ? year : year - 1;
+    const endYearShort = String((startYear + 1) % 100).padStart(2, "0");
+    return `${startYear}-${endYearShort}`;
+  };
+  const buildTransactionAuditData = (transactions: any[]) => {
+    const studentStats = students.reduce((acc, student) => {
+      const studentTransactions = transactions.filter((tx) => tx.student_id === student.id);
+      const studentIncome = studentTransactions
+        .filter((tx) => tx.amount > 0)
+        .reduce((sum, tx) => sum + tx.amount, 0);
+      const studentExpense = studentTransactions
+        .filter((tx) => tx.amount < 0)
+        .reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+
+      acc[student.id] = {
+        currentBalance: student.balance || 0,
+        totalIncome: studentIncome,
+        totalExpense: studentExpense,
+      };
+      return acc;
+    }, {} as Record<string, { currentBalance: number; totalIncome: number; totalExpense: number }>);
+
+    return transactions.map((tx) => {
+      const student = students.find((s) => s.id === tx.student_id);
+      const stats = tx.student_id ? studentStats[tx.student_id] : undefined;
+      return {
+        Date: new Date(tx.created_at).toLocaleDateString(),
+        Student: student?.full_name || "Unknown",
+        RollID: student?.roll_id || "N/A",
+        Description: tx.description,
+        Type: tx.type,
+        Amount: formatSignedCurrency(tx.amount),
+        CurrentBalance: formatSignedCurrency(stats?.currentBalance ?? 0),
+        StudentIncome: formatSignedCurrency(stats?.totalIncome ?? 0),
+        StudentExpense: formatSignedCurrency(-(stats?.totalExpense ?? 0)),
+      };
+    });
+  };
+
+  const handleDownloadFinances = (type: "all" | "month" | "year" | "custom") => {
+    let data = ledger.filter((item) => !item.student_id);
+    const now = new Date();
+    
+    if (type === "month") {
+      data = data.filter(item => {
+        const d = new Date(item.created_at);
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      });
+    } else if (type === "year") {
+      data = data.filter(item => {
+        const d = new Date(item.created_at);
+        return d.getFullYear() === now.getFullYear();
+      });
+    } else if (type === "custom" && financeStartDate && financeEndDate) {
+      const s = new Date(financeStartDate);
+      const e = new Date(financeEndDate);
+      e.setHours(23, 59, 59, 999);
+      data = data.filter(item => {
+        const d = new Date(item.created_at);
+        return d >= s && d <= e;
+      });
+    }
+
+    const exportData = data.map(item => ({
+      Date: new Date(item.created_at).toLocaleDateString(),
+      Description: item.description,
+      Party: item.party_name,
+      Type: item.amount > 0 ? "Income" : "Expense",
+      Amount: formatSignedCurrency(item.amount),
+    }));
+
+    downloadPDF("Global Finance Records", exportData, `finances_${type}_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
+
+  const handleDownloadStudents = () => {
+    const exportData = students.map(s => ({
+      Name: s.full_name,
+      RollID: s.roll_id,
+      Balance: `₹${s.balance.toLocaleString()}`,
+      Date: (s as any).created_at
+        ? new Date((s as any).created_at).toLocaleDateString()
+        : new Date().toLocaleDateString(),
+    }));
+    downloadPDF("Student Personnel List", exportData, `students_all_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
+
+  const handleDownloadStudentLedger = (student: Student) => {
+    const studentTransactions = fundTransactions.filter(tx => tx.student_id === student.id);
+    const exportData = studentTransactions.map(tx => ({
+      Date: new Date(tx.created_at).toLocaleDateString(),
+      Description: tx.description,
+      Type: tx.type,
+      Amount: `₹${tx.amount.toLocaleString()}`,
+    }));
+    downloadPDF(`Ledger for ${student.full_name}`, exportData, `ledger_${student.full_name}_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
 
   // ─── Selective Bulk Add State ───────────────────────────────────────────────────────
   const [selectiveAmount, setSelectiveAmount] = useState("");
@@ -223,6 +330,38 @@ function AdminDashboardContent() {
       );
     });
   }, [fundTransactions, viewingStudent, transactionSearch, students]);
+
+  useEffect(() => {
+    if (!isMounted || fundTransactions.length === 0 || students.length === 0) return;
+
+    const now = new Date();
+    // Financial year completion happens after March, so trigger from April onward.
+    if (now.getMonth() < 3) return;
+
+    const previousFyStartYear = now.getFullYear() - 1;
+    const previousFyLabel = `${previousFyStartYear}-${String(now.getFullYear() % 100).padStart(2, "0")}`;
+    const storageKey = `auto_financial_year_audit_${previousFyLabel}`;
+    if (localStorage.getItem(storageKey) === "done") return;
+
+    const previousFyTransactions = fundTransactions.filter((tx) => {
+      const txDate = new Date(tx.created_at);
+      const fyLabel = getFinancialYearLabel(txDate);
+      return fyLabel === previousFyLabel;
+    });
+
+    if (previousFyTransactions.length === 0) {
+      localStorage.setItem(storageKey, "done");
+      return;
+    }
+
+    const auditData = buildTransactionAuditData(previousFyTransactions);
+    downloadPDF(
+      `Full Transaction Audit - FY ${previousFyLabel}`,
+      auditData,
+      `transactions_fy_${previousFyLabel}_${new Date().toISOString().split("T")[0]}.pdf`
+    );
+    localStorage.setItem(storageKey, "done");
+  }, [isMounted, fundTransactions, students]);
 
   // ─── Bulk Student Import State ─────────────────────────────────────────────────────
   const [bulkStudentJson, setBulkStudentJson] = useState("");
@@ -1064,7 +1203,12 @@ function AdminDashboardContent() {
                 <div className="bg-white/5 p-6 rounded-[2rem] border border-white/5">
                    <h4 className="text-xs font-black uppercase text-gray-500 tracking-widest mb-4">Account Overview</h4>
                    <div className="grid grid-cols-2 gap-4">
-                      <div className="bg-emerald-500/10 p-4 rounded-2xl border border-emerald-500/20"><p className="text-[8px] text-gray-400 font-bold uppercase tracking-widest">Balance</p><p className="text-2xl font-black text-emerald-400">₹{viewingStudent.balance.toLocaleString()}</p></div>
+                      <div className={`p-4 rounded-2xl border ${viewingStudent.balance >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-rose-500/10 border-rose-500/20'}`}>
+                        <p className="text-[8px] text-gray-400 font-bold uppercase tracking-widest">Balance</p>
+                        <p className={`text-2xl font-black ${viewingStudent.balance >= 0 ? 'text-emerald-400' : 'text-rose-500'}`}>
+                          ₹{viewingStudent.balance.toLocaleString()}
+                        </p>
+                      </div>
                       <div className="bg-blue-500/10 p-4 rounded-2xl border border-blue-500/20"><p className="text-[8px] text-gray-400 font-bold uppercase tracking-widest">Class</p><p className="text-xl font-black text-white">{viewingStudent.grade}</p></div>
                    </div>
                    <div className="grid grid-cols-2 gap-3 mt-4">
@@ -1075,7 +1219,12 @@ function AdminDashboardContent() {
 
              </div>
              <div className="bg-white/5 p-6 rounded-[2rem] border border-white/5 flex flex-col">
-                <h4 className="text-xs font-black uppercase text-gray-500 tracking-widest mb-4">Personal Ledger & Logs</h4>
+                <div className="flex justify-between items-center mb-4">
+                   <h4 className="text-xs font-black uppercase text-gray-500 tracking-widest">Personal Ledger & Logs</h4>
+                   <button onClick={() => handleDownloadStudentLedger(viewingStudent)} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-[8px] font-black uppercase tracking-widest text-white transition-all flex items-center">
+                      <Download className="w-3 h-3 mr-2"/> Download History (PDF)
+                   </button>
+                </div>
                 <div className="flex-1 space-y-3 max-h-[400px] overflow-y-auto pr-2">
                    {notifications.filter(n => n.student_id === viewingStudent.id).map((n, idx) => (
                       <div key={`n-${idx}`} className="p-4 bg-amber-900/10 border border-amber-500/20 rounded-2xl flex justify-between items-start group">
@@ -1375,7 +1524,9 @@ function AdminDashboardContent() {
                      <h5 className="text-xl font-black text-white uppercase">{singleSelected.full_name}</h5>
                      <div className="flex items-center space-x-3 mt-2">
                         <span className="text-[10px] font-bold text-gray-500">ID: {singleSelected.roll_id}</span>
-                        <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded-lg">Balance: ₹{singleSelected.balance.toLocaleString()}</span>
+                        <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${singleSelected.balance >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-rose-500 bg-rose-500/10'}`}>
+                          Balance: ₹{singleSelected.balance.toLocaleString()}
+                        </span>
                      </div>
                      <div className="mt-6 space-y-3">
                         <input value={singlePurpose} onChange={(e) => setSinglePurpose(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl text-xs text-white" placeholder="Specific Reason..." />
@@ -1396,7 +1547,9 @@ function AdminDashboardContent() {
                         {students.filter(s => s.full_name.toLowerCase().includes(singleSearch.toLowerCase()) || s.roll_id.toLowerCase().includes(singleSearch.toLowerCase())).slice(0, 10).map(s => (
                            <button key={s.id} onClick={() => setSingleSelected(s)} className="w-full p-4 rounded-xl border border-white/5 bg-white/5 flex justify-between items-center hover:bg-white/10 transition-colors">
                               <div className="text-left"><p className="font-bold text-sm text-white">{s.full_name}</p><p className="text-[10px] text-gray-600 font-bold uppercase">ROLL: {s.roll_id}</p></div>
-                              <span className="text-xs font-black text-emerald-500">₹{s.balance.toLocaleString()}</span>
+                              <span className={`text-xs font-black ${s.balance >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                ₹{s.balance.toLocaleString()}
+                              </span>
                            </button>
                         ))}
                      </div>
@@ -1441,7 +1594,8 @@ function AdminDashboardContent() {
                </button>
             </div>
          </div>
-         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="space-y-4">
                <input value={selectivePurpose} onChange={(e) => setSelectivePurpose(e.target.value)} className="w-full px-5 py-4 bg-black/40 border border-white/10 rounded-2xl text-white font-bold outline-none" placeholder="Reason (optional)" />
                <div className="relative">
@@ -1493,8 +1647,48 @@ function AdminDashboardContent() {
              </div>
           ))}
        </div>
-       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          <div className="bg-white/5 border border-white/10 p-8 rounded-[2.5rem] space-y-6">
+
+       <div className="bg-white/5 border border-white/10 p-8 rounded-[2.5rem] backdrop-blur-xl">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+             <div>
+                <h4 className="text-xl font-black flex items-center text-white"><Download className="w-6 h-6 mr-3 text-emerald-400"/>Download Financial Records</h4>
+                <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest mt-1">Export ledger data to PDF format</p>
+             </div>
+             <div className="flex flex-wrap items-center gap-3">
+                <button onClick={() => handleDownloadFinances("month")} className="px-5 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all flex items-center">
+                   <Calendar className="w-3 h-3 mr-2 text-emerald-400"/> This Month
+                </button>
+                <button onClick={() => handleDownloadFinances("year")} className="px-5 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all flex items-center">
+                   <Calendar className="w-3 h-3 mr-2 text-emerald-400"/> This Year
+                </button>
+                <button onClick={() => handleDownloadFinances("all")} className="px-5 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all flex items-center shadow-lg shadow-emerald-900/20">
+                   <Download className="w-3 h-3 mr-2"/> Total History
+                </button>
+             </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6 pt-6 border-t border-white/5">
+             <div className="space-y-2">
+                <label className="text-[9px] font-black text-gray-600 uppercase tracking-widest block">Custom Start Date</label>
+                <input type="date" value={financeStartDate} onChange={(e) => setFinanceStartDate(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl text-xs font-black text-white outline-none" />
+             </div>
+             <div className="space-y-2">
+                <label className="text-[9px] font-black text-gray-600 uppercase tracking-widest block">Custom End Date</label>
+                <input type="date" value={financeEndDate} onChange={(e) => setFinanceEndDate(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-xl text-xs font-black text-white outline-none" />
+             </div>
+             <div className="flex items-end">
+                <button 
+                  onClick={() => handleDownloadFinances("custom")} 
+                  disabled={!financeStartDate || !financeEndDate}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:bg-gray-800 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all flex items-center justify-center"
+                >
+                   <Download className="w-3 h-3 mr-2"/> Download Custom Range
+                </button>
+             </div>
+          </div>
+       </div>
+
+       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+          <div className="bg-white/5 border border-white/10 p-8 rounded-[2.5rem] space-y-6 sticky top-8">
              <h4 className="text-xl font-black flex items-center font-black"><Banknote className="w-6 h-6 mr-3 text-blue-400"/>Vault Management</h4>
              <div className="space-y-4">
                 <div><label className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2 block">Entry Description</label><input value={ledgerPurpose} onChange={(e) => setLedgerPurpose(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-2xl text-sm font-bold text-white outline-none" placeholder="e.g. Monthly Electricity" /></div>
@@ -1506,7 +1700,7 @@ function AdminDashboardContent() {
                 <button onClick={handlePostLedger} disabled={loading} className="w-full py-5 bg-blue-600 hover:bg-blue-500 rounded-2xl font-black uppercase text-[10px] tracking-widest text-white shadow-xl shadow-blue-900/20 transition-all">{loading ? 'Posting...' : 'Commit to Ledger'}</button>
              </div>
           </div>
-          <div className="lg:col-span-2 bg-white/5 border border-white/10 p-8 rounded-[2.5rem] flex flex-col">
+          <div className="lg:col-span-2 bg-white/5 border border-white/10 p-8 rounded-[2.5rem] flex flex-col h-[600px]">
              <h4 className="font-black text-xl mb-6 font-black uppercase text-xl">System Ledger Audit</h4>
              <div className="flex-1 space-y-3 overflow-y-auto pr-2 custom-scroll">
                 {ledger.map((log, i) => (
@@ -1527,199 +1721,268 @@ function AdminDashboardContent() {
     </div>
   );
 
+  const handleDownloadTransactions = () => {
+    const data = buildTransactionAuditData(searchedTransactions);
+    downloadPDF("Full Transaction Audit", data, `transactions_full_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
+
   const renderTransactionsTab = () => {
+    const totalCredits = searchedTransactions
+      .filter((tx) => tx.amount > 0)
+      .reduce((sum, tx) => sum + tx.amount, 0);
+    const totalDebits = searchedTransactions
+      .filter((tx) => tx.amount < 0)
+      .reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+    const netFlow = totalCredits - totalDebits;
+    const studentsWithActivity = students.filter((student) =>
+      searchedTransactions.some((tx) => tx.student_id === student.id)
+    ).length;
+    const sortedTransactions = [...searchedTransactions].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    const recentTransactions = sortedTransactions.slice(0, 10);
+    const mostActiveStudents = students
+      .map((student) => {
+        const studentTx = sortedTransactions.filter((tx) => tx.student_id === student.id);
+        const balance = studentTx.reduce((sum, tx) => sum + tx.amount, 0);
+        return { student, count: studentTx.length, balance };
+      })
+      .filter((entry) => entry.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
 
     return (
       <div className="space-y-5">
-        <div className="bg-white/5 border border-white/10 p-5 rounded-[1.75rem] backdrop-blur-xl">
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+        <div className="bg-gradient-to-r from-rose-600/15 via-indigo-600/10 to-blue-600/15 border border-white/10 p-5 rounded-[1.5rem] backdrop-blur-xl">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div>
-              <h3 className="text-lg md:text-xl font-black uppercase tracking-tighter">Lifetime Transactions</h3>
-              <p className="text-[10px] md:text-xs text-gray-400 uppercase tracking-widest mt-2">{viewingStudent ? `Lifetime history for ${viewingStudent.full_name}` : 'Complete transaction audit for all students'}</p>
+              <h3 className="text-xl md:text-2xl font-black uppercase tracking-tight flex items-center">
+                <Activity className="w-5 h-5 mr-2 text-rose-400" />
+                Transactions / History
+              </h3>
+              <p className="text-[10px] text-gray-300 uppercase tracking-widest mt-2">
+                {viewingStudent
+                  ? `Viewing ledger for ${viewingStudent.full_name}`
+                  : "Centralized transaction intelligence across all students"}
+              </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleDownloadTransactions}
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-white uppercase font-black tracking-[0.18em] text-[9px] transition-all flex items-center"
+              >
+                <Download className="w-3 h-3 mr-2" />
+                Download PDF
+              </button>
               {viewingStudent && (
-                <button onClick={() => setViewingStudent(null)} className="self-start sm:self-auto px-3.5 py-2 bg-blue-600 hover:bg-blue-500 rounded-2xl text-white uppercase font-black tracking-[0.2em] text-[9px] transition-all">Show all history</button>
+                <button
+                  onClick={() => setViewingStudent(null)}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-white uppercase font-black tracking-[0.18em] text-[9px] transition-all"
+                >
+                  Show All History
+                </button>
               )}
               {!viewingStudent && fundTransactions.length === 0 && (
-                <button onClick={addTestTransactions} disabled={loading} className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-2xl text-white uppercase font-black tracking-[0.2em] text-[9px] transition-all disabled:opacity-50">Add Test Transactions</button>
+                <button
+                  onClick={addTestTransactions}
+                  disabled={loading}
+                  className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 rounded-xl text-white uppercase font-black tracking-[0.18em] text-[9px] transition-all disabled:opacity-50"
+                >
+                  Add Test Transactions
+                </button>
               )}
             </div>
           </div>
         </div>
 
-        {/* Search Bar */}
         {!viewingStudent && (
-          <div className="bg-white/5 border border-white/10 p-5 rounded-[1.75rem] backdrop-blur-xl">
-            <div className="flex items-center gap-4">
+          <div className="bg-white/5 border border-white/10 p-4 rounded-[1.25rem] backdrop-blur-xl">
+            <div className="flex flex-col md:flex-row md:items-end gap-3">
               <div className="flex-1">
                 <label className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2 block">Search Transactions</label>
                 <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-white/30 w-5 h-5" />
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 w-4 h-4" />
                   <input
                     value={transactionSearch}
                     onChange={(e) => setTransactionSearch(e.target.value)}
-                    className="w-full pl-12 pr-5 py-4 bg-black/40 border border-white/10 rounded-2xl text-white font-bold outline-none placeholder-gray-500"
-                    placeholder="Search by student name, roll ID, grade, email, description, amount, or type..."
+                    className="w-full pl-10 pr-4 py-3 bg-black/40 border border-white/10 rounded-xl text-white text-sm font-bold outline-none placeholder-gray-500"
+                    placeholder="Search student, roll ID, description, amount, or type..."
                   />
                 </div>
               </div>
-              <div className="flex items-end">
-                <div className="bg-blue-500/10 px-4 py-2 rounded-xl border border-blue-500/30">
-                  <span className="text-sm font-black text-blue-400">{searchedTransactions.length} Results</span>
+              <div className="grid grid-cols-2 gap-2 min-w-[210px]">
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-2.5 text-center">
+                  <p className="text-[8px] uppercase tracking-widest text-blue-400 font-black">Results</p>
+                  <p className="text-sm font-black text-blue-300">{searchedTransactions.length}</p>
+                </div>
+                <div className="bg-white/5 border border-white/10 rounded-xl p-2.5 text-center">
+                  <p className="text-[8px] uppercase tracking-widest text-gray-400 font-black">Students</p>
+                  <p className="text-sm font-black text-white">{studentsWithActivity}</p>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 max-h-96 overflow-y-auto">
-          {searchedTransactions.length === 0 ? (
-            <div className="col-span-full bg-black/40 border border-white/10 p-4 rounded-xl text-center text-gray-400 uppercase tracking-widest font-black text-sm">
-              {transactionSearch ? 'No transactions match your search.' : 'No transaction history found.'}
-            </div>
-          ) : searchedTransactions.map((tx, index) => {
-            const student = students.find(s => s.id === tx.student_id);
-            return (
-              <div key={index} className="bg-white/5 border border-white/10 p-3 rounded-xl backdrop-blur-xl hover:bg-white/10 transition-all">
-                <div className="flex flex-col justify-between h-full">
-                  <div className="flex-1 min-w-0 mb-2">
-                    <div className="flex flex-wrap items-center gap-1 text-[8px] uppercase tracking-widest font-black text-gray-500 mb-1">
-                      <span className="truncate">{student ? student.full_name : 'Unknown'}</span>
-                      <span>•</span>
-                      <span>ID: {student?.roll_id || 'N/A'}</span>
-                    </div>
-                    <h4 className="text-xs font-black uppercase truncate mb-1">{tx.description || 'Transaction'}</h4>
-                    <p className="text-[7px] text-gray-500 uppercase tracking-widest">{new Date(tx.created_at).toLocaleDateString()}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className={`font-black text-sm ${tx.amount > 0 ? 'text-emerald-400' : 'text-rose-500'}`}>{tx.amount > 0 ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString()}</p>
-                    <span className={`inline-block mt-1 px-1.5 py-0.5 rounded text-[6px] font-black uppercase ${tx.type === 'deposit' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>{tx.type || 'adj'}</span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="bg-white/5 border border-white/10 rounded-xl p-3">
+            <p className="text-[8px] uppercase tracking-widest text-gray-500 font-black">Entries</p>
+            <p className="text-lg font-black text-white mt-1">{searchedTransactions.length}</p>
+          </div>
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3">
+            <p className="text-[8px] uppercase tracking-widest text-emerald-400 font-black">Credits</p>
+            <p className="text-lg font-black text-emerald-300 mt-1">₹{totalCredits.toLocaleString()}</p>
+          </div>
+          <div className="bg-rose-500/10 border border-rose-500/20 rounded-xl p-3">
+            <p className="text-[8px] uppercase tracking-widest text-rose-400 font-black">Debits</p>
+            <p className="text-lg font-black text-rose-300 mt-1">₹{totalDebits.toLocaleString()}</p>
+          </div>
+          <div className={`${netFlow >= 0 ? "bg-emerald-500/10 border-emerald-500/20" : "bg-rose-500/10 border-rose-500/20"} border rounded-xl p-3`}>
+            <p className={`text-[8px] uppercase tracking-widest font-black ${netFlow >= 0 ? "text-emerald-400" : "text-rose-400"}`}>Net Flow</p>
+            <p className={`text-lg font-black mt-1 ${netFlow >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatSignedCurrency(netFlow)}</p>
+          </div>
+          <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-3">
+            <p className="text-[8px] uppercase tracking-widest text-indigo-400 font-black">Coverage</p>
+            <p className="text-lg font-black text-indigo-300 mt-1">{studentsWithActivity}/{students.length}</p>
+          </div>
         </div>
 
-        {/* Personal Ledger & Logs Section */}
-        <div className="bg-gradient-to-br from-indigo-600/10 to-purple-600/10 border border-indigo-500/20 p-6 md:p-8 rounded-[2.5rem] backdrop-blur-xl">
-          {/* Header with Stats */}
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6 mb-8 pb-6 border-b border-white/10">
-            <div>
-              <h3 className="text-2xl md:text-3xl font-black uppercase tracking-tighter flex items-center">
-                <BookOpen className="w-7 h-7 mr-3 text-indigo-400" />
-                Personal Ledger & Logs
-              </h3>
-              <p className="text-[9px] md:text-[10px] text-indigo-400 font-bold uppercase tracking-widest mt-2">Complete transaction history for all students</p>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="xl:col-span-2 bg-white/5 border border-white/10 rounded-[1.25rem] p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-sm font-black uppercase tracking-widest text-white">Recent Global Activity</h4>
+              <span className="text-[8px] uppercase tracking-widest text-gray-500 font-black">Latest 10 entries</span>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-indigo-500/10 border border-indigo-500/20 p-4 rounded-xl">
-                <p className="text-[8px] text-indigo-400 font-black uppercase tracking-widest">Total Transactions</p>
-                <p className="text-3xl font-black text-indigo-300 mt-2">{searchedTransactions.length}</p>
-              </div>
-              <div className="bg-purple-500/10 border border-purple-500/20 p-4 rounded-xl">
-                <p className="text-[8px] text-purple-400 font-black uppercase tracking-widest">Active Students</p>
-                <p className="text-3xl font-black text-purple-300 mt-2">{students.length}</p>
-              </div>
+            <div className="space-y-2 max-h-[310px] overflow-y-auto pr-1 custom-scroll">
+              {recentTransactions.length === 0 ? (
+                <div className="bg-black/30 border border-white/10 rounded-xl p-4 text-center text-[10px] uppercase tracking-widest font-black text-gray-500">
+                  {transactionSearch ? "No transactions match your search." : "No transaction history found."}
+                </div>
+              ) : recentTransactions.map((tx, index) => {
+                const student = students.find((s) => s.id === tx.student_id);
+                return (
+                  <div key={tx.id || index} className="grid grid-cols-[1.1fr_70px_95px] gap-2 items-center bg-black/30 border border-white/10 rounded-lg px-3 py-2.5 hover:bg-black/40 transition-all">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-black uppercase text-white truncate">{tx.description || "Transaction"}</p>
+                      <p className="text-[8px] text-gray-500 uppercase tracking-widest truncate">
+                        {student?.full_name || "Unknown"} • ID: {student?.roll_id || "N/A"} • {new Date(tx.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div className="text-center">
+                      <span className={`inline-flex items-center justify-center w-full py-0.5 rounded text-[7px] font-black uppercase ${
+                        tx.amount > 0 ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/20 text-rose-300"
+                      }`}>
+                        {tx.type || "adj"}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <p className={`text-xs font-black ${tx.amount > 0 ? "text-emerald-400" : "text-rose-500"}`}>
+                        {tx.amount > 0 ? "+" : ""}₹{Math.abs(tx.amount).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
-          {/* Students Ledger */}
-          <div className="space-y-5 max-h-[750px] overflow-y-auto pr-3 custom-scroll">
+          <div className="bg-white/5 border border-white/10 rounded-[1.25rem] p-4">
+            <h4 className="text-sm font-black uppercase tracking-widest text-white mb-3">Most Active Students</h4>
+            <div className="space-y-2">
+              {mostActiveStudents.length === 0 ? (
+                <div className="bg-black/30 border border-white/10 rounded-lg p-3 text-[10px] uppercase tracking-widest font-black text-gray-500 text-center">
+                  No student activity yet
+                </div>
+              ) : mostActiveStudents.map(({ student, count, balance }) => (
+                <div key={student.id} className="bg-black/30 border border-white/10 rounded-lg p-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-black uppercase text-white truncate">{student.full_name}</p>
+                    <p className="text-[8px] text-gray-500 uppercase tracking-widest truncate">ID: {student.roll_id} • {count} txn</p>
+                  </div>
+                  <p className={`text-xs font-black ${balance >= 0 ? "text-emerald-400" : "text-rose-500"}`}>
+                    ₹{Math.abs(balance).toLocaleString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-gradient-to-br from-indigo-600/10 to-purple-600/10 border border-indigo-500/20 p-4 rounded-[1.5rem] backdrop-blur-xl">
+          <div className="mb-4 pb-3 border-b border-white/10">
+            <h3 className="text-lg md:text-xl font-black uppercase tracking-tight flex items-center">
+              <BookOpen className="w-4 h-4 mr-2 text-indigo-400" />
+              Personal Ledger & Logs
+            </h3>
+            <p className="text-[8px] text-indigo-400 font-bold uppercase tracking-widest mt-1.5">Complete transaction history for all students</p>
+          </div>
+
+          <div className="space-y-3 max-h-[620px] overflow-y-auto pr-1 custom-scroll">
             {students.length === 0 ? (
-              <div className="col-span-full bg-white/5 border border-white/10 p-12 rounded-2xl backdrop-blur-xl text-center">
-                <Users className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-                <p className="text-sm font-black text-gray-500 uppercase">No students enrolled yet</p>
+              <div className="bg-white/5 border border-white/10 p-8 rounded-xl backdrop-blur-xl text-center">
+                <Users className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+                <p className="text-xs font-black text-gray-500 uppercase">No students enrolled yet</p>
               </div>
             ) : students.map((student) => {
-              const studentTransactions = searchedTransactions.filter(tx => tx.student_id === student.id);
+              const studentTransactions = sortedTransactions.filter((tx) => tx.student_id === student.id);
               const totalBalance = studentTransactions.reduce((sum, tx) => sum + tx.amount, 0);
-              const totalIncome = studentTransactions.filter(tx => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
-              const totalExpense = studentTransactions.filter(tx => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
-              
+              const totalIncome = studentTransactions.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
+              const totalExpense = studentTransactions.filter((tx) => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+
               return (
-                <div key={student.id} className="bg-black/30 hover:bg-black/40 border border-indigo-500/20 hover:border-indigo-500/40 rounded-2xl transition-all">
-                  {/* Student Header */}
-                  <div className="bg-gradient-to-r from-indigo-600/10 to-purple-600/10 p-5 border-b border-indigo-500/20">
-                    <div className="flex justify-between items-start gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3 mb-2">
-                          <div className="w-10 h-10 bg-indigo-600/20 border border-indigo-500/30 rounded-lg flex items-center justify-center font-black text-indigo-300">
-                            {student.full_name[0]}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <h4 className="text-sm md:text-base font-black text-white uppercase truncate">{student.full_name}</h4>
-                            <p className="text-[8px] text-gray-400 uppercase tracking-widest truncate">ID: {student.roll_id} • {student.grade || 'N/A'}</p>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <p className={`text-2xl md:text-3xl font-black ${totalBalance >= 0 ? 'text-emerald-400' : 'text-rose-500'}`}>
-                          ₹{Math.abs(totalBalance).toLocaleString()}
-                        </p>
-                        <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-1">{studentTransactions.length} txn</p>
-                      </div>
+                <div key={student.id} className="bg-black/30 border border-indigo-500/20 rounded-xl">
+                  <div className="p-3 border-b border-white/10 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-black uppercase text-white truncate">{student.full_name}</p>
+                      <p className="text-[8px] uppercase tracking-widest text-gray-500 truncate">ID: {student.roll_id} • {student.grade || "N/A"} • {studentTransactions.length} txn</p>
                     </div>
+                    <p className={`text-sm font-black ${totalBalance >= 0 ? "text-emerald-400" : "text-rose-500"}`}>
+                      ₹{Math.abs(totalBalance).toLocaleString()}
+                    </p>
                   </div>
 
-                  {/* Transaction Stats & List */}
-                  <div className="p-5">
+                  <div className="p-3">
                     {studentTransactions.length === 0 ? (
-                      <div className="text-center py-8">
-                        <Activity className="w-8 h-8 text-gray-700 mx-auto mb-2" />
-                        <p className="text-xs text-gray-600 uppercase tracking-widest font-bold">No transactions yet</p>
-                      </div>
+                      <p className="text-[10px] uppercase tracking-widest text-gray-600 font-black text-center py-2">No transactions yet</p>
                     ) : (
                       <>
-                        {/* Summary Stats */}
-                        <div className="grid grid-cols-3 gap-3 mb-5 pb-5 border-b border-white/5">
-                          <div className="bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg text-center">
-                            <p className="text-[7px] text-emerald-400 font-black uppercase tracking-tight">Income</p>
-                            <p className="text-sm md:text-base font-black text-emerald-300 mt-1">+₹{totalIncome.toLocaleString()}</p>
+                        <div className="grid grid-cols-3 gap-2 mb-3">
+                          <div className="bg-emerald-500/10 border border-emerald-500/20 p-2 rounded-lg text-center">
+                            <p className="text-[7px] text-emerald-400 font-black uppercase">Income</p>
+                            <p className="text-[11px] font-black text-emerald-300 mt-1">+₹{totalIncome.toLocaleString()}</p>
                           </div>
-                          <div className="bg-rose-500/10 border border-rose-500/20 p-3 rounded-lg text-center">
-                            <p className="text-[7px] text-rose-400 font-black uppercase tracking-tight">Expense</p>
-                            <p className="text-sm md:text-base font-black text-rose-300 mt-1">-₹{totalExpense.toLocaleString()}</p>
+                          <div className="bg-rose-500/10 border border-rose-500/20 p-2 rounded-lg text-center">
+                            <p className="text-[7px] text-rose-400 font-black uppercase">Expense</p>
+                            <p className="text-[11px] font-black text-rose-300 mt-1">-₹{totalExpense.toLocaleString()}</p>
                           </div>
-                          <div className={`${totalBalance >= 0 ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-amber-500/10 border border-amber-500/20'} p-3 rounded-lg text-center`}>
-                            <p className={`text-[7px] font-black uppercase tracking-tight ${totalBalance >= 0 ? 'text-blue-400' : 'text-amber-400'}`}>Net</p>
-                            <p className={`text-sm md:text-base font-black mt-1 ${totalBalance >= 0 ? 'text-blue-300' : 'text-amber-300'}`}>₹{totalBalance.toLocaleString()}</p>
+                          <div className={`${totalBalance >= 0 ? "bg-emerald-500/10 border-emerald-500/20" : "bg-rose-500/10 border-rose-500/20"} border p-2 rounded-lg text-center`}>
+                            <p className={`text-[7px] font-black uppercase ${totalBalance >= 0 ? "text-emerald-400" : "text-rose-400"}`}>Net</p>
+                            <p className={`text-[11px] font-black mt-1 ${totalBalance >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatSignedCurrency(totalBalance)}</p>
                           </div>
                         </div>
 
-                        {/* Recent Transactions */}
-                        <div className="space-y-2">
-                          <p className="text-[8px] font-black text-gray-500 uppercase tracking-widest mb-3">Recent Transactions</p>
-                          {studentTransactions
-                            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-                            .slice(0, 8)
-                            .map((tx, index) => (
-                              <div key={tx.id || index} className="flex justify-between items-center p-3 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 hover:border-indigo-500/20 transition-all">
-                                <div className="flex items-center gap-3 flex-1 min-w-0">
-                                  <div className={`w-3 h-3 rounded-full shrink-0 ${tx.amount > 0 ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
-                                  <div className="min-w-0 flex-1">
-                                    <p className="text-xs font-black text-white uppercase truncate">{tx.description || 'Transaction'}</p>
-                                    <p className="text-[7px] text-gray-600 uppercase tracking-tight">{new Date(tx.created_at).toLocaleDateString()}</p>
-                                  </div>
-                                </div>
-                                <div className="text-right ml-3">
-                                  <p className={`text-sm font-black ${tx.amount > 0 ? 'text-emerald-400' : 'text-rose-500'}`}>
-                                    {tx.amount > 0 ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString()}
-                                  </p>
-                                  <span className={`inline-block px-2 py-0.5 rounded text-[6px] font-black uppercase shrink-0 ${
-                                    tx.type === 'deposit' ? 'bg-emerald-500/20 text-emerald-300' :
-                                    tx.type === 'withdrawal' ? 'bg-rose-500/20 text-rose-300' :
-                                    'bg-blue-500/20 text-blue-300'
-                                  }`}>
-                                    {tx.type || 'adj'}
-                                  </span>
-                                </div>
+                        <div className="space-y-1.5">
+                          {studentTransactions.slice(0, 6).map((tx, index) => (
+                            <div key={tx.id || index} className="grid grid-cols-[1.1fr_62px_85px] gap-2 items-center text-[10px] bg-white/5 border border-white/10 rounded-lg px-2.5 py-2">
+                              <div className="min-w-0">
+                                <p className="font-black uppercase text-white truncate">{tx.description || "Transaction"}</p>
+                                <p className="text-[7px] uppercase tracking-widest text-gray-600">{new Date(tx.created_at).toLocaleDateString()}</p>
                               </div>
-                            ))}
-                          {studentTransactions.length > 8 && (
-                            <p className="text-center text-[8px] text-gray-600 uppercase tracking-widest font-bold pt-2">
-                              +{studentTransactions.length - 8} more transactions
+                              <span className={`text-center rounded py-0.5 text-[7px] font-black uppercase ${
+                                tx.type === "deposit" ? "bg-emerald-500/20 text-emerald-300" :
+                                tx.type === "withdrawal" ? "bg-rose-500/20 text-rose-300" :
+                                "bg-blue-500/20 text-blue-300"
+                              }`}>
+                                {tx.type || "adj"}
+                              </span>
+                              <p className={`text-right font-black ${tx.amount > 0 ? "text-emerald-400" : "text-rose-500"}`}>
+                                {tx.amount > 0 ? "+" : ""}₹{Math.abs(tx.amount).toLocaleString()}
+                              </p>
+                            </div>
+                          ))}
+                          {studentTransactions.length > 6 && (
+                            <p className="text-center text-[8px] text-gray-600 uppercase tracking-widest font-bold pt-1">
+                              +{studentTransactions.length - 6} more transactions
                             </p>
                           )}
                         </div>
@@ -1889,10 +2152,16 @@ function AdminDashboardContent() {
               <h3 className="text-lg sm:text-xl md:text-2xl font-black italic uppercase text-white tracking-tighter">Personnel Desk</h3>
               <p className="text-[9px] sm:text-[10px] md:text-xs text-indigo-400 font-bold uppercase tracking-widest mt-1">{filteredStudents.length} of {students.length} members</p>
           </div>
-          <button onClick={() => { setEditingUser(null); setShowUserModal(true); }} className="w-full md:w-auto px-6 sm:px-8 py-3 sm:py-4 bg-indigo-600 hover:bg-indigo-500 rounded-xl sm:rounded-2xl font-black uppercase tracking-[0.2em] text-[9px] sm:text-[10px] shadow-xl shadow-indigo-900/40 transition-all flex items-center justify-center">
-             <UserPlus className="w-3.5 h-3.5 sm:w-4 sm:h-4 mr-2 sm:mr-3"/>
-             Enroll New Personnel
-          </button>
+          <div className="flex flex-col sm:flex-row w-full md:w-auto gap-3">
+             <button onClick={handleDownloadStudents} className="px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl font-black uppercase tracking-widest text-[9px] text-white transition-all flex items-center justify-center">
+                <Download className="w-3.5 h-3.5 mr-2 text-emerald-400"/>
+                Download All Personnel (PDF)
+             </button>
+             <button onClick={() => { setEditingUser(null); setShowUserModal(true); }} className="px-6 sm:px-8 py-3 sm:py-4 bg-indigo-600 hover:bg-indigo-500 rounded-xl sm:rounded-2xl font-black uppercase tracking-[0.2em] text-[9px] sm:text-[10px] shadow-xl shadow-indigo-900/40 transition-all flex items-center justify-center">
+                <UserPlus className="w-3.5 h-3.5 sm:w-4 sm:h-4 mr-2 sm:mr-3"/>
+                Enroll New Personnel
+             </button>
+          </div>
        </div>
        
        {/* Bulk Import Section */}

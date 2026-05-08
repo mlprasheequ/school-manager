@@ -18,10 +18,12 @@ export async function validateSession(): Promise<boolean> {
   }
 
   try {
-    // Fetch the latest user data from database
+    // Fetch latest user data in a schema-safe way.
+    // Selecting specific columns can fail if an optional column
+    // (like last_password_change) does not exist in some databases.
     const { data: userData, error } = await supabase
       .from('students')
-      .select('password, is_responsible, last_password_change')
+      .select('*')
       .eq('id', session.id)
       .single();
 
@@ -40,7 +42,7 @@ export async function validateSession(): Promise<boolean> {
     }
 
     // Check if password was changed after login
-    if (userData.last_password_change && session.loginTimestamp) {
+    if (userData?.last_password_change && session.loginTimestamp) {
       const loginTime = new Date(session.loginTimestamp).getTime();
       const passwordChangeTime = new Date(userData.last_password_change).getTime();
       
